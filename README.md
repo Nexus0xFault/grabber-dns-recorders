@@ -1,16 +1,16 @@
-
 # grabber-dns-recorders
 
-Multi-server DNS lookup tool written in Bash. Query DNS records across public and custom DNS resolvers, scan multiple domains and IP addresses, and export results to a file.
+A parallel multi-server DNS lookup tool written in Bash. Query DNS records using public and custom DNS resolvers, scan multiple domains and IP addresses, and save results to a file.
 
 ## Features
 
 - Query 12 DNS record types: `A`, `AAAA`, `MX`, `NS`, `CNAME`, `TXT`, `SOA`, `PTR`, `SRV`, `CAA`, `DS`, `DNSKEY`.
-- Use built-in public DNS servers or specify custom servers.
+- Execute DNS queries concurrently for faster scanning.
+- Use built-in public DNS servers or custom resolvers.
 - Load DNS servers and targets from files.
 - Scan multiple domains and IP addresses.
-- Save results to an output file.
-- Detect DNS errors and missing records.
+- Export results to a file.
+- Detect DNS errors, timeouts, and missing records.
 
 ## Requirements
 
@@ -20,32 +20,28 @@ Multi-server DNS lookup tool written in Bash. Query DNS records across public an
 
 ## Installation
 
-```bash
-sudo apt install dnsutils python3
-chmod +x grabber-dns-recorders.sh
-```
+    sudo apt install dnsutils python3
+    chmod +x grabber-dns-recorders.sh
 
 ## Usage
 
-```bash
-# Use public DNS servers
-./grabber-dns-recorders.sh --public example.com
+    # Use public DNS servers
+    ./grabber-dns-recorders.sh --public example.com
 
-# Use custom DNS servers
-./grabber-dns-recorders.sh --custom 8.8.8.8,1.1.1.1 example.com
+    # Use custom DNS servers
+    ./grabber-dns-recorders.sh --custom 8.8.8.8,1.1.1.1 example.com
 
-# Load DNS servers from a file
-./grabber-dns-recorders.sh -d dns.txt example.com
+    # Load DNS servers from a file
+    ./grabber-dns-recorders.sh -d dns.txt example.com
 
-# Scan targets from a file and save results
-./grabber-dns-recorders.sh --public -l targets.txt -o results.txt
+    # Scan targets from a file and save results
+    ./grabber-dns-recorders.sh --public -l targets.txt -o results.txt
 
-# Combine public and file-based DNS servers
-./grabber-dns-recorders.sh --public -d dns.txt -l targets.txt -o results.txt
+    # Combine public and file-based DNS servers
+    ./grabber-dns-recorders.sh --public -d dns.txt -l targets.txt -o results.txt
 
-# Display help
-./grabber-dns-recorders.sh --help
-```
+    # Display help
+    ./grabber-dns-recorders.sh --help
 
 ## File Formats
 
