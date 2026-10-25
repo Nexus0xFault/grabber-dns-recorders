@@ -75,19 +75,21 @@ Options:
   --custom LIST        Comma-separated custom DNS servers
   -d FILE              Read DNS servers from a file
   -l FILE              Read targets from a file
-  -o FILE              Save output to a file
-  -h, --help           Show this help
+  -o FILE              Save results to a file
+  -j N                 Number of parallel DNS servers (default: 10)
+  -h, --help           Show help
 
 Examples:
   $0 --public example.com
-  $0 --custom 1.1.1.1,8.8.8.8 example.com
+  $0 --public -j 20 example.com
+  $0 --custom 8.8.8.8,1.1.1.1 example.com
   $0 -d dns.txt example.com
-  $0 --public -d dns.txt -l targets.txt -o results.txt
-  $0 --custom ns1.example.net,ns2.example.net -l targets.txt -o results.txt
+  $0 --public -l targets.txt -o results.txt
+  $0 --public -d dns.txt -j 20 -l targets.txt -o results.txt
 
 File format:
   One domain, IP address, or DNS server per line.
-  Blank lines and lines beginning with # are ignored.
+  Blank lines and lines starting with # are ignored.
 EOF
 }
 
@@ -96,6 +98,7 @@ is_ipv4() {
     local -a octets
 
     [[ "$ip" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] || return 1
+
     IFS='.' read -r -a octets <<< "$ip"
 
     for part in "${octets[@]}"; do
@@ -118,7 +121,7 @@ except ValueError:
 is_hostname() {
     local host="$1"
 
-    [[ ${#host} -le 253 ]] || return 1
+    [[ ${#host} -le 253 ]] &&
     [[ "$host" =~ ^([a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)(\.([a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?))*\.?$ ]]
 }
 
@@ -176,6 +179,7 @@ dns_file=""
 targets_file=""
 output_file=""
 target=""
+parallel_jobs=10
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -186,7 +190,6 @@ while [[ $# -gt 0 ]]; do
         --custom)
             if [[ $# -lt 2 || "$2" == -* ]]; then
                 echo "Error: --custom requires a comma-separated list." >&2
-                usage
                 exit 1
             fi
             custom_enabled=true
@@ -217,6 +220,14 @@ while [[ $# -gt 0 ]]; do
             output_file="$2"
             shift 2
             ;;
+        -j)
+            [[ $# -ge 2 && "$2" =~ ^[1-9][0-9]*$ ]] || {
+                echo "Error: -j requires a positive integer." >&2
+                exit 1
+            }
+            parallel_jobs="$2"
+            shift 2
+            ;;
         -h|--help)
             usage
             exit 0
@@ -238,7 +249,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ -n "$targets_file" && -n "$target" ]]; then
-    echo "Error: use either -l FILE or a positional target, not both." >&2
+    echo "Error: use either -l FILE or a positional target." >&2
     exit 1
 fi
 
@@ -258,7 +269,10 @@ fi
 targets=()
 
 if [[ -n "$targets_file" ]]; then
-    mapfile -t targets < <(read_list_file "$targets_file") || exit 1
+    if ! mapfile -t targets < <(read_list_file "$targets_file"); then
+        echo "Error: failed to read target file." >&2
+        exit 1
+    fi
 
     if [[ ${#targets[@]} -eq 0 ]]; then
         echo "Error: target file is empty." >&2
@@ -287,14 +301,10 @@ if [[ "$custom_enabled" == true ]]; then
     for server in "${custom_dns[@]}"; do
         server="${server//[[:space:]]/}"
 
-        if [[ -z "$server" ]]; then
-            echo "Error: empty entry in --custom list." >&2
-            exit 1
-        fi
-
-        if ! is_ipv4 "$server" &&
-           ! is_ipv6 "$server" &&
-           ! is_hostname "$server"; then
+        if [[ -z "$server" ]] ||
+           { ! is_ipv4 "$server" &&
+             ! is_ipv6 "$server" &&
+             ! is_hostname "$server"; }; then
             echo "Error: invalid DNS server: $server" >&2
             exit 1
         fi
@@ -304,7 +314,12 @@ if [[ "$custom_enabled" == true ]]; then
 fi
 
 if [[ -n "$dns_file" ]]; then
-    mapfile -t file_dns < <(read_list_file "$dns_file") || exit 1
+    file_dns=()
+
+    if ! mapfile -t file_dns < <(read_list_file "$dns_file"); then
+        echo "Error: failed to read DNS file." >&2
+        exit 1
+    fi
 
     for server in "${file_dns[@]}"; do
         if ! is_ipv4 "$server" &&
@@ -345,11 +360,55 @@ if [[ -n "$output_file" ]]; then
     exec > >(tee "$output_file") 2>&1
 fi
 
+scan_server() {
+    local server="$1"
+    local query_target="$2"
+    shift 2
+    local record result status answers
+
+    printf '######## DNS SERVER: %s ########\n' "$server"
+
+    for record in "$@"; do
+        printf '\n--- %s %s ---\n' "$record" "$query_target"
+
+        result=$(dig @"$server" "$query_target" "$record" \
+            +time=2 +tries=1 +noall +comments +answer 2>&1)
+        status=$?
+
+        if [[ $status -ne 0 ]] ||
+           grep -qiE 'communications error|timed out|no servers could be reached' <<< "$result"; then
+            echo "[ERROR] Query failed or timed out"
+        elif grep -q 'status: NXDOMAIN' <<< "$result"; then
+            echo "[NXDOMAIN] Name does not exist"
+        elif grep -qE 'status: (SERVFAIL|REFUSED|FORMERR)' <<< "$result"; then
+            grep -oE 'status: [A-Z]+' <<< "$result" | head -n 1
+        elif grep -q 'status: NOERROR' <<< "$result"; then
+            answers=$(sed -n '/;; ANSWER SECTION:/,$p' <<< "$result" |
+                grep -v '^;;' || true)
+
+            if [[ -n "$answers" ]]; then
+                printf '%s\n' "$answers"
+            else
+                echo "[NO ANSWER]"
+            fi
+        else
+            echo "[ERROR] Unexpected DNS response"
+        fi
+    done
+}
+
+tmpdir=$(mktemp -d) || {
+    echo "Error: cannot create temporary directory." >&2
+    exit 1
+}
+trap 'rm -rf "$tmpdir"' EXIT
+
 echo "=================================================="
-echo "Targets:      ${#targets[@]}"
-echo "DNS servers:  ${#dns_servers[@]}"
-echo "Mode:         public=$public_enabled custom=$custom_enabled"
-echo "Output:       ${output_file:-terminal}"
+echo "Targets:       ${#targets[@]}"
+echo "DNS servers:   ${#dns_servers[@]}"
+echo "Parallel jobs: $parallel_jobs"
+echo "Mode:          public=$public_enabled custom=$custom_enabled"
+echo "Output:        ${output_file:-terminal}"
 echo "=================================================="
 
 for target in "${targets[@]}"; do
@@ -375,43 +434,36 @@ for target in "${targets[@]}"; do
         query_records=("${dns_records[@]}")
     fi
 
-    for server in "${dns_servers[@]}"; do
-        echo
-        echo "######## DNS SERVER: $server ########"
+    server_count=${#dns_servers[@]}
 
-        for record in "${query_records[@]}"; do
-            printf '\n--- %s %s ---\n' "$record" "$query_target"
+    for ((start = 0; start < server_count; start += parallel_jobs)); do
+        batch_pids=()
+        batch_indices=()
 
-            result=$(dig @"$server" "$query_target" "$record" \
-                +time=2 +tries=1 +noall +comments +answer 2>&1)
-            status=$?
+        for ((offset = start; offset < start + parallel_jobs && offset < server_count; offset++)); do
+            server="${dns_servers[$offset]}"
+            result_file="$tmpdir/result_$offset"
 
-            if [[ $status -ne 0 ]] ||
-               grep -qiE 'communications error|timed out|no servers could be reached' <<< "$result"; then
-                echo "[ERROR] Query failed or timed out"
-            elif grep -q 'status: NXDOMAIN' <<< "$result"; then
-                echo "[NXDOMAIN] Name does not exist"
-            elif grep -qE 'status: (SERVFAIL|REFUSED|FORMERR)' <<< "$result"; then
-                grep -oE 'status: [A-Z]+' <<< "$result" | head -n 1
-            elif grep -q 'status: NOERROR' <<< "$result"; then
-                answers=$(sed -n '/;; ANSWER SECTION:/,$p' <<< "$result" |
-                    grep -v '^;;' || true)
+            scan_server "$server" "$query_target" "${query_records[@]}" \
+                > "$result_file" 2>&1 &
 
-                if [[ -n "$answers" ]]; then
-                    printf '%s\n' "$answers"
-                else
-                    echo "[NO ANSWER] No matching record in the answer section"
-                fi
-            else
-                echo "[ERROR] Unexpected DNS response"
-                printf '%s\n' "$result"
-            fi
+            batch_pids+=("$!")
+            batch_indices+=("$offset")
+        done
+
+        for pid in "${batch_pids[@]}"; do
+            wait "$pid" || true
+        done
+
+        for offset in "${batch_indices[@]}"; do
+            cat "$tmpdir/result_$offset"
         done
     done
 done
 
 echo
 echo "=============== SCAN COMPLETE ==============="
+
 if [[ -n "$output_file" ]]; then
     echo "Results saved to: $output_file"
 fi
